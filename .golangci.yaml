@@ -1,0 +1,13 @@
+version: "2"
+
+run:
+  timeout: 2m
+  tests: false
+
+linters:
+  default: none
+  enable:
+    - funcorder
+  exclusions:
+    paths:
+      - examples/input  # intentional violations — input fixture for the fixer

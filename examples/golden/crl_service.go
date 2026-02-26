@@ -17,15 +17,38 @@ import (
 	"math/big"
 	"time"
 
-	"simpleca/config"
-	apperrors "simpleca/internal/apperrors"
-	"simpleca/internal/core/domain/constants"
-	"simpleca/internal/core/domain/entities"
-	"simpleca/internal/core/domain/ifacerepositories"
-	"simpleca/internal/core/domain/ifaceservicies"
-
 	"github.com/google/uuid"
+
+	"github.com/vajrock/funcorder-fix/stubs/apperrors"
+	"github.com/vajrock/funcorder-fix/stubs/config"
+	"github.com/vajrock/funcorder-fix/stubs/constants"
+	"github.com/vajrock/funcorder-fix/stubs/entities"
+	"github.com/vajrock/funcorder-fix/stubs/ifacerepositories"
+	"github.com/vajrock/funcorder-fix/stubs/ifaceservicies"
 )
+
+// crlScheduler управляет автоматической генерацией CRL по расписанию.
+type crlScheduler struct {
+	service *crlService
+}
+
+// newCRLScheduler создаёт новый планировщик для автоматической генерации CRL.
+func newCRLScheduler(service *crlService) *crlScheduler {
+	return &crlScheduler{
+		service: service,
+	}
+}
+
+// startScheduled запускает автоматическую генерацию CRL по расписанию.
+func (s *crlScheduler) startScheduled(_ context.Context) error {
+	// Implementation would go here
+	return nil
+}
+
+// stop останавливает автоматическую генерацию CRL.
+func (s *crlScheduler) stop() {
+	// Implementation would go here
+}
 
 // crlService реализует интерфейс CRLService и предоставляет функциональность
 // управления списками отозванных сертификатов, включая генерацию, валидацию,
@@ -151,22 +174,6 @@ func (s *crlService) StopAutoCRLGeneration() {
 	s.scheduler.stop()
 }
 
-// Helper method to get intermediate certificate (similar to certificate_service.go).
-func (s *crlService) getIntermediateCertificate(ctx context.Context) (*entities.IntermediateCertificate, error) {
-	// Get all intermediate certificates and return the most recent one.
-	intermediateCerts, err := s.intermediateCertRepo.ListIntermediateCertificates(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get intermediate certificates: %w", err) //nolint:goconst // формат-строка для ошибки
-	}
-
-	if len(intermediateCerts) == 0 {
-		return nil, entities.ErrNoIntermediateCertificate
-	}
-
-	// Return the most recent one (last in the slice).
-	return &intermediateCerts[len(intermediateCerts)-1], nil
-}
-
 // GetCRL retrieves current CRL in requested format (pem or der).
 func (s *crlService) GetCRL(ctx context.Context, format entities.CertificateFormat) (string, error) {
 	// Default to PEM if no format specified.
@@ -210,93 +217,6 @@ func (s *crlService) GetCRL(ctx context.Context, format entities.CertificateForm
 		s.metricsCollector.IncrementCRLDownloads(intermediateCA, string(format), "400")
 		return "", fmt.Errorf("%w: %s", entities.ErrUnsupportedFormat, format) //nolint:goconst // формат-строка для ошибки
 	}
-}
-
-// getCRLPEM retrieves CRL in PEM format from cache or database, generating if needed.
-func (s *crlService) getCRLPEM(ctx context.Context, format entities.CertificateFormat) (string, error) {
-	intermediateCA := unknownCA
-
-	if s.lastGeneratedCRL != nil {
-		s.metricsCollector.IncrementCRLCacheHits(s.lastGeneratedCRL.IssuerUUID.String())
-		return s.lastGeneratedCRL.CrlValue, nil
-	}
-
-	latestCRL, err := s.getLatestCRLFromDB(ctx)
-	if err != nil {
-		if errors.Is(err, apperrors.ErrCRLNotFound) {
-			return s.handleMissingCRL(ctx, format)
-		}
-		s.metricsCollector.IncrementCRLDownloads(intermediateCA, string(format), "500")
-		s.metricsCollector.IncrementErrors("crl_service", "get_crl", "database_error") //nolint:goconst // метки для метрик
-		return "", fmt.Errorf("failed to get latest CRL from database: %w", err)
-	}
-
-	s.metricsCollector.IncrementCRLCacheMisses(latestCRL.IssuerUUID.String())
-	return latestCRL.CrlValue, nil
-}
-
-// handleMissingCRL handles the case when CRL is not found in database.
-func (s *crlService) handleMissingCRL(ctx context.Context, format entities.CertificateFormat) (string, error) {
-	intermediateCA := unknownCA
-
-	// Try to generate an empty CRL if password is cached.
-	if s.passwordManager.HasCachedPassword(ctx) {
-		genErr := s.generateCRLWithPassword(ctx, "")
-		if genErr != nil {
-			s.metricsCollector.IncrementErrors("crl_service", "get_crl", "generation_error")
-			return "", fmt.Errorf("failed to generate initial CRL: %w", genErr)
-		}
-		// Try to get CRL again after generation.
-		latestCRL, err := s.getLatestCRLFromDB(ctx)
-		if err != nil {
-			s.metricsCollector.IncrementCRLDownloads(intermediateCA, string(format), "500")
-			return "", fmt.Errorf("failed to get CRL after generation: %w", err)
-		}
-		s.metricsCollector.IncrementCRLCacheMisses(latestCRL.IssuerUUID.String())
-		return latestCRL.CrlValue, nil
-	}
-
-	// No cached password - return error indicating CRL needs to be generated.
-	s.metricsCollector.IncrementCRLDownloads(intermediateCA, string(format), "404")
-	return "", entities.ErrCRLCachePasswordRequired
-}
-
-// convertPEMToDER converts CRL from PEM to DER format.
-func (s *crlService) convertPEMToDER(crlPEM, intermediateCA string) (string, error) {
-	block, _ := pem.Decode([]byte(crlPEM))
-	if block == nil {
-		s.metricsCollector.IncrementCRLDownloads(intermediateCA, string(entities.FormatDER), "500")
-		s.metricsCollector.IncrementErrors("crl_service", "get_crl", "crypto_error")
-		return "", entities.ErrCRLDecodeFailed
-	}
-
-	derData := string(block.Bytes)
-	s.metricsCollector.IncrementCRLDownloads(intermediateCA, string(entities.FormatDER), "200")
-	s.metricsCollector.SetCRLSize(intermediateCA, string(entities.FormatDER), float64(len(derData)))
-	return derData, nil
-}
-
-// Helper method to get latest CRL from database.
-func (s *crlService) getLatestCRLFromDB(ctx context.Context) (*entities.CrlMetadata, error) {
-	// Get all CRL metadata and return the most recent one.
-	crlMetadataList, err := s.crlMetadataRepo.ListCrlMetadata(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list CRL metadata: %w", err)
-	}
-
-	if len(crlMetadataList) == 0 {
-		return nil, apperrors.ErrCRLNotFound
-	}
-
-	// Return the most recent one (highest CRL number or latest GeneratedAt).
-	var latestCRL *entities.CrlMetadata
-	for i := range crlMetadataList {
-		if latestCRL == nil || crlMetadataList[i].GeneratedAt.After(latestCRL.GeneratedAt) {
-			latestCRL = &crlMetadataList[i]
-		}
-	}
-
-	return latestCRL, nil
 }
 
 // AddRevokedCertificate adds a certificate to CRL.
@@ -427,16 +347,65 @@ func (s *crlService) ValidateCRLIntegrity(ctx context.Context, crlPEM string) er
 	return nil
 }
 
-// validateCRLSignature проверяет подпись CRL и алгоритм подписи
-func (s *crlService) validateCRLSignature(crl *x509.RevocationList, issuerCert *x509.Certificate) error {
-	if err := crl.CheckSignatureFrom(issuerCert); err != nil {
-		return fmt.Errorf("CRL signature verification failed: %w", err)
+// GetRevokedCertificates retrieves all revoked certificates
+func (s *crlService) GetRevokedCertificates(ctx context.Context) ([]entities.Certificate, error) {
+	// Get all revoked certificates from the certificate repository
+	revokedCerts, err := s.certRepo.GetCertificatesByStatus(ctx, entities.StatusRevoked)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get revoked certificates: %w", err)
 	}
 
-	if crl.SignatureAlgorithm == x509.UnknownSignatureAlgorithm {
-		return entities.ErrCRLUnknownSignature
+	return revokedCerts, nil
+}
+
+// AddRevokedCertificateWithPassword adds a certificate to CRL with password for signing
+func (s *crlService) AddRevokedCertificateWithPassword(ctx context.Context, cert *entities.Certificate, password string) error {
+	// First add the certificate to CRL entries (same as original method)
+	if err := s.AddRevokedCertificate(ctx, cert); err != nil {
+		return err
 	}
 
+	// Check if auto CRL update after revoke is enabled
+	if s.config.Server.AutoUpdateCRLAfterRevoke {
+		// Trigger CRL regeneration with password using unified method
+		return s.generateCRLWithPassword(ctx, password)
+	}
+
+	return nil
+}
+
+// GenerateCRLWithPassword generates CRL with password for signing
+func (s *crlService) GenerateCRLWithPassword(ctx context.Context, password string) error {
+	return s.generateCRLWithPassword(ctx, password)
+}
+
+// CachePassword caches the intermediate CA password for future CRL operations
+func (s *crlService) CachePassword(ctx context.Context, password string) error {
+	if err := s.passwordManager.CachePassword(ctx, password); err != nil {
+		return apperrors.Wrap(
+			err,
+			"password_cache_error",
+			"failed to cache password",
+			constants.HTTPStatusInternalServerError,
+		) //nolint:goconst // код ошибки
+	}
+	return nil
+}
+
+// GetCachedPassword retrieves the cached password, returns error if not cached
+func (s *crlService) GetCachedPassword(ctx context.Context) (string, error) {
+	password, err := s.passwordManager.GetCachedPassword(ctx)
+	if err != nil {
+		return "", apperrors.Wrap(err, "password_cache_error", "failed to get cached password", constants.HTTPStatusInternalServerError)
+	}
+	return password, nil
+}
+
+// ValidatePassword validates if the provided password matches the cached one
+func (s *crlService) ValidatePassword(ctx context.Context, password string) error {
+	if err := s.passwordManager.ValidatePassword(ctx, password); err != nil {
+		return apperrors.Wrap(err, "password_validation_error", "password validation failed", constants.HTTPStatusUnauthorized)
+	}
 	return nil
 }
 
@@ -522,6 +491,255 @@ func validateRevokedCertEntries(crl *x509.RevocationList) error {
 	return nil
 }
 
+// VerifyPassword verifies if the provided password can decrypt the intermediate CA private key
+func (s *crlService) VerifyPassword(ctx context.Context, password string) error {
+	// Try to get the intermediate CA private key with the provided password
+	_, err := s.getIntermediateCAPrivateKey(ctx, password)
+	if err != nil {
+		return fmt.Errorf("password verification failed: %w", err)
+	}
+
+	return nil
+}
+
+// HasCachedPassword returns true if a password is currently cached
+func (s *crlService) HasCachedPassword(ctx context.Context) bool {
+	return s.passwordManager.HasCachedPassword(ctx)
+}
+
+// ClearCachedPassword removes the cached password
+func (s *crlService) ClearCachedPassword(ctx context.Context) error {
+	if err := s.passwordManager.ClearCachedPassword(ctx); err != nil {
+		return apperrors.Wrap(err, "password_cache_error", "failed to clear cached password", constants.HTTPStatusInternalServerError)
+	}
+	return nil
+}
+
+// HealthCheck performs a comprehensive health check of the CRL service
+func (s *crlService) HealthCheck(ctx context.Context) *ifaceservicies.HealthCheckResult {
+	start := time.Now()
+	result := &ifaceservicies.HealthCheckResult{
+		Status:    ifaceservicies.HealthStatusHealthy,
+		Message:   "",
+		Details:   make(map[string]string),
+		Timestamp: start,
+		Duration:  0,
+	}
+
+	// Определение проверок здоровья
+	checks := []crlHealthCheckConfig{
+		{
+			name:       "database",
+			okMessage:  "Database connection",
+			checkFunc:  s.checkDatabaseHealth,
+			isCritical: true,
+		},
+		{
+			name:       "crl_repository",
+			okMessage:  "CRL repository",
+			checkFunc:  s.checkCRLRepositoryHealth,
+			isCritical: false,
+		},
+		{
+			name:       "certificate_repository",
+			okMessage:  "Certificate repository",
+			checkFunc:  s.checkCertificateRepositoryHealth,
+			isCritical: false,
+		},
+		{
+			name:       "intermediate_cert",
+			okMessage:  "Intermediate certificate access",
+			checkFunc:  s.checkIntermediateCertificateAccess,
+			isCritical: false,
+		},
+		{
+			name:       "password_management",
+			okMessage:  "Password management",
+			checkFunc:  s.checkPasswordManagementHealth,
+			isCritical: false,
+		},
+		{
+			name:       "crl_generation",
+			okMessage:  "CRL generation capability",
+			checkFunc:  s.checkCRLGenerationCapability,
+			isCritical: false,
+		},
+		{
+			name:       "scheduler",
+			okMessage:  "Scheduler",
+			checkFunc:  s.checkSchedulerHealth,
+			isCritical: false,
+		},
+	}
+
+	// Выполнение всех проверок
+	for _, check := range checks {
+		s.runCRLHealthCheck(ctx, result, check)
+	}
+
+	result.Duration = time.Since(start)
+
+	switch result.Status {
+	case ifaceservicies.HealthStatusHealthy:
+		result.Message = "CRL service is fully operational"
+	case ifaceservicies.HealthStatusDegraded:
+		result.Message = "CRL service is operational with limited functionality"
+	case ifaceservicies.HealthStatusUnhealthy:
+		result.Message = "CRL service is not operational"
+	}
+
+	return result
+}
+
+// Name returns the name of the service
+func (s *crlService) Name() string {
+	return "CRLService"
+}
+
+// Helper method to get intermediate certificate (similar to certificate_service.go).
+func (s *crlService) getIntermediateCertificate(ctx context.Context) (*entities.IntermediateCertificate, error) {
+	// Get all intermediate certificates and return the most recent one.
+	intermediateCerts, err := s.intermediateCertRepo.ListIntermediateCertificates(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get intermediate certificates: %w", err) //nolint:goconst // формат-строка для ошибки
+	}
+
+	if len(intermediateCerts) == 0 {
+		return nil, entities.ErrNoIntermediateCertificate
+	}
+
+	// Return the most recent one (last in the slice).
+	return &intermediateCerts[len(intermediateCerts)-1], nil
+}
+
+// getCRLPEM retrieves CRL in PEM format from cache or database, generating if needed.
+func (s *crlService) getCRLPEM(ctx context.Context, format entities.CertificateFormat) (string, error) {
+	intermediateCA := unknownCA
+
+	if s.lastGeneratedCRL != nil {
+		s.metricsCollector.IncrementCRLCacheHits(s.lastGeneratedCRL.IssuerUUID.String())
+		return s.lastGeneratedCRL.CrlValue, nil
+	}
+
+	latestCRL, err := s.getLatestCRLFromDB(ctx)
+	if err != nil {
+		if errors.Is(err, apperrors.ErrCRLNotFound) {
+			return s.handleMissingCRL(ctx, format)
+		}
+		s.metricsCollector.IncrementCRLDownloads(intermediateCA, string(format), "500")
+		s.metricsCollector.IncrementErrors("crl_service", "get_crl", "database_error") //nolint:goconst // метки для метрик
+		return "", fmt.Errorf("failed to get latest CRL from database: %w", err)
+	}
+
+	s.metricsCollector.IncrementCRLCacheMisses(latestCRL.IssuerUUID.String())
+	return latestCRL.CrlValue, nil
+}
+
+// handleMissingCRL handles the case when CRL is not found in database.
+func (s *crlService) handleMissingCRL(ctx context.Context, format entities.CertificateFormat) (string, error) {
+	intermediateCA := unknownCA
+
+	// Try to generate an empty CRL if password is cached.
+	if s.passwordManager.HasCachedPassword(ctx) {
+		genErr := s.generateCRLWithPassword(ctx, "")
+		if genErr != nil {
+			s.metricsCollector.IncrementErrors("crl_service", "get_crl", "generation_error")
+			return "", fmt.Errorf("failed to generate initial CRL: %w", genErr)
+		}
+		// Try to get CRL again after generation.
+		latestCRL, err := s.getLatestCRLFromDB(ctx)
+		if err != nil {
+			s.metricsCollector.IncrementCRLDownloads(intermediateCA, string(format), "500")
+			return "", fmt.Errorf("failed to get CRL after generation: %w", err)
+		}
+		s.metricsCollector.IncrementCRLCacheMisses(latestCRL.IssuerUUID.String())
+		return latestCRL.CrlValue, nil
+	}
+
+	// No cached password - return error indicating CRL needs to be generated.
+	s.metricsCollector.IncrementCRLDownloads(intermediateCA, string(format), "404")
+	return "", entities.ErrCRLCachePasswordRequired
+}
+
+// Helper function to encode integer as ASN.1 DER
+func encodeInteger(i int64) []byte {
+	// This is a simplified implementation
+	// In production, would use proper ASN.1 encoding
+	return big.NewInt(i).Bytes()
+}
+
+// GenerateCRLHash generates SHA256 hash for CRL integrity check
+func generateCRLHash(
+	crlNumber int64,
+	issuerUUID string,
+	thisUpdate time.Time,
+	nextUpdate time.Time,
+	crlSize int,
+) string {
+	// Format the data as specified in the specification
+	data := fmt.Sprintf("%d|%s|%s|%s|%d",
+		crlNumber,
+		issuerUUID,
+		thisUpdate.UTC().Format(time.RFC3339),
+		nextUpdate.UTC().Format(time.RFC3339),
+		crlSize)
+
+	// Calculate SHA256 hash
+	hash := sha256.Sum256([]byte(data))
+	return hex.EncodeToString(hash[:])
+}
+
+// convertPEMToDER converts CRL from PEM to DER format.
+func (s *crlService) convertPEMToDER(crlPEM, intermediateCA string) (string, error) {
+	block, _ := pem.Decode([]byte(crlPEM))
+	if block == nil {
+		s.metricsCollector.IncrementCRLDownloads(intermediateCA, string(entities.FormatDER), "500")
+		s.metricsCollector.IncrementErrors("crl_service", "get_crl", "crypto_error")
+		return "", entities.ErrCRLDecodeFailed
+	}
+
+	derData := string(block.Bytes)
+	s.metricsCollector.IncrementCRLDownloads(intermediateCA, string(entities.FormatDER), "200")
+	s.metricsCollector.SetCRLSize(intermediateCA, string(entities.FormatDER), float64(len(derData)))
+	return derData, nil
+}
+
+// Helper method to get latest CRL from database.
+func (s *crlService) getLatestCRLFromDB(ctx context.Context) (*entities.CrlMetadata, error) {
+	// Get all CRL metadata and return the most recent one.
+	crlMetadataList, err := s.crlMetadataRepo.ListCrlMetadata(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list CRL metadata: %w", err)
+	}
+
+	if len(crlMetadataList) == 0 {
+		return nil, apperrors.ErrCRLNotFound
+	}
+
+	// Return the most recent one (highest CRL number or latest GeneratedAt).
+	var latestCRL *entities.CrlMetadata
+	for i := range crlMetadataList {
+		if latestCRL == nil || crlMetadataList[i].GeneratedAt.After(latestCRL.GeneratedAt) {
+			latestCRL = &crlMetadataList[i]
+		}
+	}
+
+	return latestCRL, nil
+}
+
+// validateCRLSignature проверяет подпись CRL и алгоритм подписи
+func (s *crlService) validateCRLSignature(crl *x509.RevocationList, issuerCert *x509.Certificate) error {
+	if err := crl.CheckSignatureFrom(issuerCert); err != nil {
+		return fmt.Errorf("CRL signature verification failed: %w", err)
+	}
+
+	if crl.SignatureAlgorithm == x509.UnknownSignatureAlgorithm {
+		return entities.ErrCRLUnknownSignature
+	}
+
+	return nil
+}
+
 // crossValidateCRLWithDatabase выполняет перекрёстную проверку CRL с базой данных
 func (s *crlService) crossValidateCRLWithDatabase(ctx context.Context, crl *x509.RevocationList) error {
 	revokedCerts, err := s.GetRevokedCertificates(ctx)
@@ -567,17 +785,6 @@ func (s *crlService) crossValidateCRLWithDatabase(ctx context.Context, crl *x509
 	}
 
 	return nil
-}
-
-// GetRevokedCertificates retrieves all revoked certificates
-func (s *crlService) GetRevokedCertificates(ctx context.Context) ([]entities.Certificate, error) {
-	// Get all revoked certificates from the certificate repository
-	revokedCerts, err := s.certRepo.GetCertificatesByStatus(ctx, entities.StatusRevoked)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get revoked certificates: %w", err)
-	}
-
-	return revokedCerts, nil
 }
 
 // createCRLInternal creates a new CRL with proper structure - unified internal method
@@ -812,34 +1019,6 @@ func (s *crlService) createCRLEntry(_ context.Context, cert *entities.Certificat
 	return revokedCertEntry, nil
 }
 
-// Helper function to encode integer as ASN.1 DER
-func encodeInteger(i int64) []byte {
-	// This is a simplified implementation
-	// In production, would use proper ASN.1 encoding
-	return big.NewInt(i).Bytes()
-}
-
-// GenerateCRLHash generates SHA256 hash for CRL integrity check
-func generateCRLHash(
-	crlNumber int64,
-	issuerUUID string,
-	thisUpdate time.Time,
-	nextUpdate time.Time,
-	crlSize int,
-) string {
-	// Format the data as specified in the specification
-	data := fmt.Sprintf("%d|%s|%s|%s|%d",
-		crlNumber,
-		issuerUUID,
-		thisUpdate.UTC().Format(time.RFC3339),
-		nextUpdate.UTC().Format(time.RFC3339),
-		crlSize)
-
-	// Calculate SHA256 hash
-	hash := sha256.Sum256([]byte(data))
-	return hex.EncodeToString(hash[:])
-}
-
 // isIntermediateKeyEncrypted checks if the intermediate CA private key is encrypted
 func (s *crlService) isIntermediateKeyEncrypted(ctx context.Context) (bool, error) {
 	// Get intermediate certificate first
@@ -869,27 +1048,6 @@ func (s *crlService) isIntermediateKeyEncrypted(ctx context.Context) (bool, erro
 
 	// If parsing succeeds without password, key is not encrypted
 	return false, nil
-}
-
-// AddRevokedCertificateWithPassword adds a certificate to CRL with password for signing
-func (s *crlService) AddRevokedCertificateWithPassword(ctx context.Context, cert *entities.Certificate, password string) error {
-	// First add the certificate to CRL entries (same as original method)
-	if err := s.AddRevokedCertificate(ctx, cert); err != nil {
-		return err
-	}
-
-	// Check if auto CRL update after revoke is enabled
-	if s.config.Server.AutoUpdateCRLAfterRevoke {
-		// Trigger CRL regeneration with password using unified method
-		return s.generateCRLWithPassword(ctx, password)
-	}
-
-	return nil
-}
-
-// GenerateCRLWithPassword generates CRL with password for signing
-func (s *crlService) GenerateCRLWithPassword(ctx context.Context, password string) error {
-	return s.generateCRLWithPassword(ctx, password)
 }
 
 // getIntermediateCAPrivateKey retrieves and decrypts the intermediate CA private key
@@ -927,60 +1085,6 @@ func (s *crlService) getIntermediateCAPrivateKey(ctx context.Context, password s
 	return rsaPrivateKey, nil
 }
 
-// CachePassword caches the intermediate CA password for future CRL operations
-func (s *crlService) CachePassword(ctx context.Context, password string) error {
-	if err := s.passwordManager.CachePassword(ctx, password); err != nil {
-		return apperrors.Wrap(
-			err,
-			"password_cache_error",
-			"failed to cache password",
-			constants.HTTPStatusInternalServerError,
-		) //nolint:goconst // код ошибки
-	}
-	return nil
-}
-
-// GetCachedPassword retrieves the cached password, returns error if not cached
-func (s *crlService) GetCachedPassword(ctx context.Context) (string, error) {
-	password, err := s.passwordManager.GetCachedPassword(ctx)
-	if err != nil {
-		return "", apperrors.Wrap(err, "password_cache_error", "failed to get cached password", constants.HTTPStatusInternalServerError)
-	}
-	return password, nil
-}
-
-// ValidatePassword validates if the provided password matches the cached one
-func (s *crlService) ValidatePassword(ctx context.Context, password string) error {
-	if err := s.passwordManager.ValidatePassword(ctx, password); err != nil {
-		return apperrors.Wrap(err, "password_validation_error", "password validation failed", constants.HTTPStatusUnauthorized)
-	}
-	return nil
-}
-
-// VerifyPassword verifies if the provided password can decrypt the intermediate CA private key
-func (s *crlService) VerifyPassword(ctx context.Context, password string) error {
-	// Try to get the intermediate CA private key with the provided password
-	_, err := s.getIntermediateCAPrivateKey(ctx, password)
-	if err != nil {
-		return fmt.Errorf("password verification failed: %w", err)
-	}
-
-	return nil
-}
-
-// HasCachedPassword returns true if a password is currently cached
-func (s *crlService) HasCachedPassword(ctx context.Context) bool {
-	return s.passwordManager.HasCachedPassword(ctx)
-}
-
-// ClearCachedPassword removes the cached password
-func (s *crlService) ClearCachedPassword(ctx context.Context) error {
-	if err := s.passwordManager.ClearCachedPassword(ctx); err != nil {
-		return apperrors.Wrap(err, "password_cache_error", "failed to clear cached password", constants.HTTPStatusInternalServerError)
-	}
-	return nil
-}
-
 // runCRLHealthCheck выполняет проверку здоровья компонента CRL.
 func (s *crlService) runCRLHealthCheck(
 	ctx context.Context,
@@ -998,87 +1102,6 @@ func (s *crlService) runCRLHealthCheck(
 	} else {
 		result.Details[hcConfig.name] = hcConfig.okMessage + " OK"
 	}
-}
-
-// HealthCheck performs a comprehensive health check of the CRL service
-func (s *crlService) HealthCheck(ctx context.Context) *ifaceservicies.HealthCheckResult {
-	start := time.Now()
-	result := &ifaceservicies.HealthCheckResult{
-		Status:    ifaceservicies.HealthStatusHealthy,
-		Message:   "",
-		Details:   make(map[string]string),
-		Timestamp: start,
-		Duration:  0,
-	}
-
-	// Определение проверок здоровья
-	checks := []crlHealthCheckConfig{
-		{
-			name:       "database",
-			okMessage:  "Database connection",
-			checkFunc:  s.checkDatabaseHealth,
-			isCritical: true,
-		},
-		{
-			name:       "crl_repository",
-			okMessage:  "CRL repository",
-			checkFunc:  s.checkCRLRepositoryHealth,
-			isCritical: false,
-		},
-		{
-			name:       "certificate_repository",
-			okMessage:  "Certificate repository",
-			checkFunc:  s.checkCertificateRepositoryHealth,
-			isCritical: false,
-		},
-		{
-			name:       "intermediate_cert",
-			okMessage:  "Intermediate certificate access",
-			checkFunc:  s.checkIntermediateCertificateAccess,
-			isCritical: false,
-		},
-		{
-			name:       "password_management",
-			okMessage:  "Password management",
-			checkFunc:  s.checkPasswordManagementHealth,
-			isCritical: false,
-		},
-		{
-			name:       "crl_generation",
-			okMessage:  "CRL generation capability",
-			checkFunc:  s.checkCRLGenerationCapability,
-			isCritical: false,
-		},
-		{
-			name:       "scheduler",
-			okMessage:  "Scheduler",
-			checkFunc:  s.checkSchedulerHealth,
-			isCritical: false,
-		},
-	}
-
-	// Выполнение всех проверок
-	for _, check := range checks {
-		s.runCRLHealthCheck(ctx, result, check)
-	}
-
-	result.Duration = time.Since(start)
-
-	switch result.Status {
-	case ifaceservicies.HealthStatusHealthy:
-		result.Message = "CRL service is fully operational"
-	case ifaceservicies.HealthStatusDegraded:
-		result.Message = "CRL service is operational with limited functionality"
-	case ifaceservicies.HealthStatusUnhealthy:
-		result.Message = "CRL service is not operational"
-	}
-
-	return result
-}
-
-// Name returns the name of the service
-func (s *crlService) Name() string {
-	return "CRLService"
 }
 
 // Helper methods for health checks

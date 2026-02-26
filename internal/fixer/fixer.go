@@ -89,29 +89,6 @@ func (f *Fixer) ProcessFile(filePath string) *Result {
 	return result
 }
 
-// fixFile applies fixes to a file and returns the fixed content.
-func (f *Fixer) fixFile(fset *token.FileSet, file *ast.File, src []byte, report *detector.Report) ([]byte, error) {
-	// Collect structs that need reordering
-	det := detector.NewDetector(fset, f.config)
-	structs := det.CollectStructMethods(file)
-
-	// Filter to only structs that need reordering
-	needsReorder := make(map[string]*detector.StructMethods)
-	for name, sm := range structs {
-		if sm.NeedsReordering() {
-			needsReorder[name] = sm
-		}
-	}
-
-	if len(needsReorder) == 0 {
-		return src, nil
-	}
-
-	// Reorder the methods
-	reorderer := NewReorderer(fset)
-	return reorderer.ReorderStructMethods(file, src, needsReorder)
-}
-
 // ProcessDirectory processes all Go files in a directory.
 func (f *Fixer) ProcessDirectory(dirPath string) []*Result {
 	var results []*Result
@@ -170,6 +147,29 @@ func (f *Fixer) WriteResult(result *Result) error {
 	// Just print to stdout
 	fmt.Println(string(result.FixedContent))
 	return nil
+}
+
+// fixFile applies fixes to a file and returns the fixed content.
+func (f *Fixer) fixFile(fset *token.FileSet, file *ast.File, src []byte, report *detector.Report) ([]byte, error) {
+	// Collect structs that need reordering
+	det := detector.NewDetector(fset, f.config)
+	structs := det.CollectStructMethods(file)
+
+	// Filter to only structs that need reordering
+	needsReorder := make(map[string]*detector.StructMethods)
+	for name, sm := range structs {
+		if sm.NeedsReordering() {
+			needsReorder[name] = sm
+		}
+	}
+
+	if len(needsReorder) == 0 {
+		return src, nil
+	}
+
+	// Reorder the methods
+	reorderer := NewReorderer(fset)
+	return reorderer.ReorderStructMethods(file, src, needsReorder)
 }
 
 // FormatDiff generates a unified diff between original and fixed content.

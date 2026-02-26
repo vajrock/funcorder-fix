@@ -52,6 +52,14 @@ func (d *Detector) CollectStructMethods(file *ast.File) map[string]*StructMethod
 	return d.collectStructMethods(file)
 }
 
+// GetMethodsToReorder returns the methods that need reordering for a struct.
+func (d *Detector) GetMethodsToReorder(sm *StructMethods) []*MethodInfo {
+	if !sm.NeedsReordering() {
+		return sm.Methods
+	}
+	return sm.GetExpectedOrder()
+}
+
 // collectStructMethods collects all methods grouped by their receiver type.
 func (d *Detector) collectStructMethods(file *ast.File) map[string]*StructMethods {
 	structs := make(map[string]*StructMethods)
@@ -169,12 +177,4 @@ func (d *Detector) checkExportedOrdering(sm *StructMethods, report *Report) {
 			}
 		}
 	}
-}
-
-// GetMethodsToReorder returns the methods that need reordering for a struct.
-func (d *Detector) GetMethodsToReorder(sm *StructMethods) []*MethodInfo {
-	if !sm.NeedsReordering() {
-		return sm.Methods
-	}
-	return sm.GetExpectedOrder()
 }
