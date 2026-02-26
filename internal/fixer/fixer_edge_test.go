@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/vajrock/funcorder-fix/internal/config"
@@ -329,6 +330,107 @@ func TestProcessDirectory_NonExistent(t *testing.T) {
 	}
 	if !hasError {
 		t.Error("expected error for non-existent directory")
+	}
+}
+
+func TestProcessDirectory_DotPath(t *testing.T) {
+	dir := t.TempDir()
+	goFile := filepath.Join(dir, "main.go")
+	src := "package main\ntype S struct{}\nfunc (s *S) b() {}\nfunc (s *S) A() {}\n"
+	if err := os.WriteFile(goFile, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Save and restore working directory.
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.DefaultConfig()
+	f := NewFixer(cfg)
+	results := f.ProcessDirectory(".")
+
+	if len(results) == 0 {
+		t.Fatal("ProcessDirectory(\".\") returned 0 results, expected at least 1")
+	}
+}
+
+func TestProcessDirectory_DotDotPath(t *testing.T) {
+	dir := t.TempDir()
+	goFile := filepath.Join(dir, "main.go")
+	src := "package main\ntype S struct{}\nfunc (s *S) b() {}\nfunc (s *S) A() {}\n"
+	if err := os.WriteFile(goFile, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a subdirectory and chdir into it, then walk "..".
+	subDir := filepath.Join(dir, "child")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	if err := os.Chdir(subDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.DefaultConfig()
+	f := NewFixer(cfg)
+	results := f.ProcessDirectory("..")
+
+	if len(results) == 0 {
+		t.Fatal("ProcessDirectory(\"..\") returned 0 results, expected at least 1")
+	}
+}
+
+func TestProcessDirectory_DotPathStillSkipsHidden(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a hidden directory with a Go file.
+	hiddenDir := filepath.Join(dir, ".secret")
+	if err := os.MkdirAll(hiddenDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hiddenDir, "hidden.go"), []byte("package secret\nfunc Foo() {}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Create a visible Go file so we know walking works.
+	if err := os.WriteFile(filepath.Join(dir, "visible.go"), []byte("package main\nfunc Bar() {}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.DefaultConfig()
+	f := NewFixer(cfg)
+	results := f.ProcessDirectory(".")
+
+	for _, r := range results {
+		if strings.Contains(r.FilePath, ".secret") {
+			t.Error(".secret/ directory should still be skipped when walking \".\"")
+		}
+	}
+	if len(results) == 0 {
+		t.Fatal("expected at least 1 result for visible.go")
 	}
 }
 

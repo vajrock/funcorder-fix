@@ -137,6 +137,17 @@ Key concept — **per-slot replacement**: for each method in its original source
 
 `ast.NewCommentMap` can associate inline body comments from function A with the following `FuncDecl` B (because it uses "innermost enclosing node" rules and a `BlockStmt` can be ambiguous). **Always use `fn.Doc` directly** (the AST field) rather than `cmap[fn]` when looking for a function's leading doc comment. `fn.Doc` is set by the parser and is always correct. `GetMethodBlock()` already follows this rule.
 
+### Pitfall: `filepath.Walk(".")` and hidden-directory filter
+
+`ProcessDirectory` skips directories whose name starts with `.` (hidden dirs like `.git`). However, `filepath.Walk(".")` calls the callback for the root directory first, and `info.Name()` returns `"."` — which starts with a dot. The filter explicitly excludes `"."` and `".."` to avoid skipping the entire walk:
+
+```go
+name := info.Name()
+if name == "vendor" || (name != "." && name != ".." && len(name) > 0 && name[0] == '.') {
+```
+
+This is tested in `TestProcessDirectory_DotPath`, `TestProcessDirectory_DotDotPath`, and `TestProcessDirectory_DotPathStillSkipsHidden`.
+
 ## Key Invariants
 
 - `sm.Methods` is always sorted by `token.Pos` (enforced at the end of `collectStructMethods`)

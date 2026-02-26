@@ -183,3 +183,25 @@ func TestCLI_WildcardDotDotDot(t *testing.T) {
 		t.Errorf("expected violations via recursive wildcard, got stderr: %q", stderr)
 	}
 }
+
+func TestCLI_DotSlashDotDotDot(t *testing.T) {
+	// Create a temp dir with Go files that have violations.
+	dir := t.TempDir()
+	src := "package main\ntype S struct{}\nfunc (s *S) b() {}\nfunc (s *S) A() {}\n"
+	if err := os.WriteFile(filepath.Join(dir, "test.go"), []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run the binary with "./..." from within the temp dir.
+	cmd := exec.Command(binaryPath, "-v", "./...")
+	cmd.Dir = dir
+	var outBuf, errBuf strings.Builder
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+
+	_ = cmd.Run() // may exit non-zero due to violations
+
+	if !strings.Contains(errBuf.String(), "violations") {
+		t.Errorf("expected stderr to mention violations when running ./... from dir, got stderr: %q", errBuf.String())
+	}
+}

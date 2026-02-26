@@ -100,7 +100,8 @@ func (f *Fixer) ProcessDirectory(dirPath string) []*Result {
 
 		// Skip vendor and hidden directories
 		if info.IsDir() {
-			if info.Name() == "vendor" || (len(info.Name()) > 0 && info.Name()[0] == '.') {
+			name := info.Name()
+			if name == "vendor" || (name != "." && name != ".." && len(name) > 0 && name[0] == '.') {
 				return filepath.SkipDir
 			}
 			return nil
