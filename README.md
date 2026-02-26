@@ -14,10 +14,12 @@ An automatic fixer for the [`funcorder`](https://github.com/manuelarte/funcorder
 
 `funcorder` enforces two rules about method ordering within a struct:
 
-1. **Constructors first** — functions named `New*`, `Must*`, or `Or*` must appear before other methods
+1. **Constructors first** — methods named `New*`, `Must*`, or `Or*` must appear before other methods of the same struct
 2. **Exported before unexported** — public methods must appear before private methods
 
-`funcorder-fix` detects these violations and rewrites the source file with methods in the correct order, preserving all comments (doc comments, inline comments, floating comments) and all non-method content (standalone functions, constants, blank lines) exactly as written.
+> **Note:** only methods with a receiver are reordered. Standalone factory functions like `func NewFoo() *Foo` (no receiver) are treated as gaps and are never moved.
+
+`funcorder-fix` detects these violations and rewrites the source file with methods in the correct order, preserving all comments (doc comments, inline comments, floating comments) and all non-method content (standalone functions, constants, blank lines) exactly as written. Generic structs (`Container[T any]`, `Map[K, V]`) are fully supported.
 
 ### Installation
 
@@ -71,13 +73,14 @@ funcorder-fix --fix -d ./...
 
 ### Before / After example
 
-**Before** (`-v` reports 16 violations):
+**Before** (`-v` reports 3 violations):
 ```go
 type UserService struct { ... }
 
+func NewUserService(repo Repository) *UserService { ... }  // standalone function — not touched
 func (s *UserService) getByID(ctx context.Context, id int) (*User, error) { ... }
-func NewUserService(repo Repository) *UserService { ... }
 func (s *UserService) Create(ctx context.Context, u *User) error { ... }
+func (s *UserService) NewFromDTO(dto *DTO) *UserService { ... }
 func (s *UserService) Delete(ctx context.Context, id int) error { ... }
 func (s *UserService) validate(u *User) error { ... }
 ```
@@ -86,7 +89,8 @@ func (s *UserService) validate(u *User) error { ... }
 ```go
 type UserService struct { ... }
 
-func NewUserService(repo Repository) *UserService { ... }
+func NewUserService(repo Repository) *UserService { ... }  // standalone — stays in place
+func (s *UserService) NewFromDTO(dto *DTO) *UserService { ... }
 func (s *UserService) Create(ctx context.Context, u *User) error { ... }
 func (s *UserService) Delete(ctx context.Context, id int) error { ... }
 func (s *UserService) getByID(ctx context.Context, id int) (*User, error) { ... }
@@ -126,10 +130,12 @@ This approach guarantees that all comments and formatting survive reordering unc
 
 `funcorder` проверяет два правила упорядочивания методов структуры:
 
-1. **Конструкторы перед остальными** — функции с именами `New*`, `Must*` или `Or*` должны стоять перед другими методами
+1. **Конструкторы перед остальными** — методы с именами `New*`, `Must*` или `Or*` должны стоять перед другими методами той же структуры
 2. **Экспортированные перед неэкспортированными** — публичные методы должны идти раньше приватных
 
-`funcorder-fix` находит нарушения и переписывает исходный файл с методами в правильном порядке, сохраняя все комментарии (doc-комментарии, встроенные, плавающие) и весь код, не относящийся к методам (отдельные функции, константы, пустые строки), в неизменном виде.
+> **Примечание:** переупорядочиваются только методы с receiver'ом. Standalone фабричные функции вроде `func NewFoo() *Foo` (без receiver'а) считаются промежутками и никогда не перемещаются.
+
+`funcorder-fix` находит нарушения и переписывает исходный файл с методами в правильном порядке, сохраняя все комментарии (doc-комментарии, встроенные, плавающие) и весь код, не относящийся к методам (отдельные функции, константы, пустые строки), в неизменном виде. Поддерживаются generic-структуры (`Container[T any]`, `Map[K, V]`).
 
 ### Установка
 
@@ -183,13 +189,14 @@ funcorder-fix --fix -d ./...
 
 ### Пример до / после
 
-**До** (`-v` сообщает о 16 нарушениях):
+**До** (`-v` сообщает о 3 нарушениях):
 ```go
 type UserService struct { ... }
 
+func NewUserService(repo Repository) *UserService { ... }  // standalone-функция — не трогается
 func (s *UserService) getByID(ctx context.Context, id int) (*User, error) { ... }
-func NewUserService(repo Repository) *UserService { ... }
 func (s *UserService) Create(ctx context.Context, u *User) error { ... }
+func (s *UserService) NewFromDTO(dto *DTO) *UserService { ... }
 func (s *UserService) Delete(ctx context.Context, id int) error { ... }
 func (s *UserService) validate(u *User) error { ... }
 ```
@@ -198,7 +205,8 @@ func (s *UserService) validate(u *User) error { ... }
 ```go
 type UserService struct { ... }
 
-func NewUserService(repo Repository) *UserService { ... }
+func NewUserService(repo Repository) *UserService { ... }  // standalone — остаётся на месте
+func (s *UserService) NewFromDTO(dto *DTO) *UserService { ... }
 func (s *UserService) Create(ctx context.Context, u *User) error { ... }
 func (s *UserService) Delete(ctx context.Context, id int) error { ... }
 func (s *UserService) getByID(ctx context.Context, id int) (*User, error) { ... }
