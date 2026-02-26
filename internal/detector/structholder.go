@@ -79,19 +79,18 @@ func newMethodInfo(fn *ast.FuncDecl) *MethodInfo {
 }
 
 // GetReceiverTypeName extracts the type name from a receiver expression.
-// Handles both value and pointer receivers.
+// Handles value receivers, pointer receivers, and generic type parameters
+// (e.g., *Container[T] produces StarExpr → IndexExpr → Ident).
 func GetReceiverTypeName(expr ast.Expr) string {
 	switch t := expr.(type) {
 	case *ast.Ident:
 		return t.Name
 	case *ast.StarExpr:
-		if ident, ok := t.X.(*ast.Ident); ok {
-			return ident.Name
-		}
+		return GetReceiverTypeName(t.X)
 	case *ast.IndexExpr:
-		if ident, ok := t.X.(*ast.Ident); ok {
-			return ident.Name
-		}
+		return GetReceiverTypeName(t.X)
+	case *ast.IndexListExpr:
+		return GetReceiverTypeName(t.X)
 	}
 	return ""
 }
