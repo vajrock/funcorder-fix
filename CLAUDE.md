@@ -12,30 +12,38 @@ An **auto-fixer** for the `funcorder` linter (https://github.com/manuelarte/func
 
 ## funcorder Rules Enforced
 
-- **Constructor ordering**: Constructors (`New*`, `Must*`, `Or*`) should appear before other methods for each struct
+- **Constructor ordering**: Constructor *methods* (`New*`, `Must*`, `Or*`) should appear before other methods for each struct
 - **Exported before unexported**: Public methods must appear before private methods for each struct
+- **Standalone functions are gaps**: `func NewFoo() *Foo` (no receiver) is never reordered — only methods with receivers are touched
+- **Generic structs supported**: `Container[T any]`, `Map[K, V]` — receiver type is resolved recursively through `StarExpr`/`IndexExpr`/`IndexListExpr`
 
 ## Development Commands
 
 ```bash
 # Build
 make build                    # Creates bin/funcorder-fix
-go build ./cmd/... ./internal/...   # Quick build check (excludes examples/ which needs stubs)
 
 # Run all tests
-go test -v -race ./...
+make test                     # go test -v -race ./...
 
 # Run a single test
 go test -v -run TestProcessFile_MixedViolations ./internal/fixer/
 go test -v -run TestDetect_ConstructorViolation ./internal/detector/
 
+# Fuzz tests (30s)
+go test -fuzz=FuzzProcessFile -fuzztime=30s ./internal/fixer/
+go test -fuzz=FuzzSpliceBytes -fuzztime=30s ./internal/fixer/
+
 # Lint (funcorder only, examples/input/ excluded intentionally)
-golangci-lint run ./...
+make lint                     # golangci-lint run ./...
 
 # Run fixer on example files
 make run-example              # Detection only
 make run-example-fix          # Fix, output to stdout (verbose goes to stderr)
 make run-example-write        # Fix, write back to files
+
+# Verify golden examples pass funcorder
+make verify-fix
 
 # Fix the tool's own source (dogfooding)
 go run ./cmd/funcorder-fix --fix -w -v ./internal/...
@@ -61,9 +69,8 @@ After any change to `internal/fixer/` or `internal/detector/`:
 # 1. Unit tests
 go test -v -race ./...
 
-# 2. Regenerate fixed examples (verbose goes to stderr, clean Go to stdout)
+# 2. Regenerate fixed examples
 go run ./cmd/funcorder-fix --fix -v ./examples/input/ > examples/golden/crl_service.go
-cp examples/input/crl_scheduler.go examples/golden/
 
 # 3. Verify zero funcorder violations in golden
 golangci-lint run --no-config -E funcorder ./examples/golden/...
@@ -74,35 +81,36 @@ go build ./examples/...
 
 If you change `testdata/src/` files, regenerate `testdata/golden/` too:
 ```bash
-go run ./cmd/funcorder-fix --fix ./testdata/src/constructor_only.go > testdata/golden/constructor_only.go
-go run ./cmd/funcorder-fix --fix ./testdata/src/exported_only.go    > testdata/golden/exported_only.go
-go run ./cmd/funcorder-fix --fix ./testdata/src/mixed_violations.go  > testdata/golden/mixed_violations.go
+# Files with violations — regenerate via fixer
+for f in constructor_only exported_only mixed_violations with_comments \
+         with_spacing multi_struct multiline_funcs generics gap_functions; do
+  go run ./cmd/funcorder-fix --fix ./testdata/src/${f}.go > testdata/golden/${f}.go
+done
+# File without violations — copy as-is
 cp testdata/src/no_violations.go testdata/golden/no_violations.go
 ```
-
-Note: `golangci-lint run` (without `--no-config`) may report `lll` and `unparam` issues from `.golangci.yaml` — only funcorder should show 0.
 
 ## Architecture
 
 ```
 funcorder-fix/
-├── cmd/funcorder-fix/main.go      # CLI entry point
+├── cmd/funcorder-fix/main.go      # CLI entry point + processPath helper
 ├── internal/
 │   ├── config/config.go           # Config struct + ViolationType enum
 │   ├── detector/
 │   │   ├── detector.go            # Entry point: CollectStructMethods → check violations
-│   │   ├── structholder.go        # MethodInfo, StructMethods, GetExpectedOrder()
+│   │   ├── structholder.go        # MethodInfo, StructMethods, GetReceiverTypeName()
 │   │   └── reports.go             # Violation and Report types
 │   └── fixer/
 │       ├── fixer.go               # Orchestrates: detect → collect → reorder → write
-│       ├── reorder.go             # Text-splice reordering (see below)
+│       ├── reorder.go             # Text-splice reordering via spliceBytes()
 │       └── comment_preserve.go    # CommentPreserver, MethodBlock, GetMethodBlock()
 ├── stubs/                          # Stub packages so examples/ can compile
 ├── examples/
-│   ├── input/                     # Source files with violations (16 in crl_service.go)
+│   ├── input/                     # Real-world file with violations (crl_service.go)
 │   └── golden/                    # Generated output (committed for reference)
 └── testdata/
-    ├── src/                       # Minimal single-struct files for unit tests
+    ├── src/                       # 10 test files covering comments, spacing, generics, etc.
     └── golden/                    # Expected fixer output (generated, committed)
 ```
 
@@ -127,7 +135,7 @@ Key concept — **per-slot replacement**: for each method in its original source
 
 ### Critical: `ast.CommentMap` gotcha
 
-`ast.NewCommentMap` can associate inline body comments from function A with the following `FuncDecl` B (because it uses "innermost enclosing node" rules and a `BlockStmt` can be ambiguous). **Always use `fn.Doc` directly** (the AST field) rather than `cmap[fn]` when looking for a function's leading doc comment. `fn.Doc` is set by the parser and is always correct.
+`ast.NewCommentMap` can associate inline body comments from function A with the following `FuncDecl` B (because it uses "innermost enclosing node" rules and a `BlockStmt` can be ambiguous). **Always use `fn.Doc` directly** (the AST field) rather than `cmap[fn]` when looking for a function's leading doc comment. `fn.Doc` is set by the parser and is always correct. `GetMethodBlock()` already follows this rule.
 
 ## Key Invariants
 
@@ -136,3 +144,4 @@ Key concept — **per-slot replacement**: for each method in its original source
 - Standalone functions (`func foo()`, no receiver) are never touched by the fixer; they live in the gaps between method slots
 - The `stubs/` package exists only to make `examples/` compilable; it contains stub types/interfaces
 - **Constructor detection applies to receiver methods only**: `func (s *S) NewCopy() *S` is detected as a constructor; the common Go idiom `func NewS() *S` (no receiver) is a standalone function and lives in a gap — never reordered
+- **`GetReceiverTypeName` is recursive**: handles `*Container[T]` → `StarExpr(IndexExpr(Ident))` and `Map[K,V]` → `IndexListExpr(Ident)` by delegating back to itself
